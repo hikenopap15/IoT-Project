@@ -1,0 +1,88 @@
+# Import necessary libraries
+from flask import Flask, jsonify, request           # Flask for web server, jsonify for responses, request for client info
+import adafruit_dht                                # DHT11 sensor library
+import board                                       # Raspberry Pi GPIO pin library
+import datetime                                    # For timestamps in logs
+import telegram                                    # For sending Telegram messages
+import requests
+
+# Initialize Flask app
+app = Flask(__name__)
+
+# Initialize DHT11 sensor on GPIO4 (physical pin 7)
+dhtDevice = adafruit_dht.DHT11(board.D4)
+
+# Define log file name
+LOG_FILE = 'sensor_access.log'
+
+# Dictionary to count repeated suspicious attempts per IP
+offender_counts = {}
+
+# Telegram bot setup
+bot_token = '7704777129:AAG0VeASDNPD3IlVCUIh-FfYXuknwJpHmqc'   
+chat_id = '7059159046'              #  Telegram chat ID
+bot = telegram.Bot(token=bot_token) # Initialize Telegram bot
+
+# Function to log requests, count offenders, and send Telegram alerts
+def log_request(ip, path, user_agent, warning=False):
+    # Write request info to log file
+    with open(LOG_FILE, 'a') as log_file:
+        line = f'{datetime.datetime.now()} - IP: {ip} - Path: {path} - User-Agent: {user_agent}'
+        if warning:
+            line += ' ⚠️ WARNING: Suspicious access attempt'
+        log_file.write(line + '\n')
+
+    # If suspicious, update offender count, print alert, and send Telegram message
+    if warning:
+        if ip in offender_counts:
+            offender_counts[ip] += 1  # Increment count
+        else:
+            offender_counts[ip] = 1   # First offense
+
+        # Print live alert to terminal
+        print(f'⚠️ ALERT: Suspicious access from {ip} to {path}')
+        print(f'⚠️ OFFENDER COUNT: {ip} has {offender_counts[ip]} suspicious attempts')
+
+         # Define message before using it
+    message = f'⚠️ Honeypot alert!\nIP: {ip}\nPath: {path}\nUser-Agent: {user_agent}\nTotal suspicious attempts: {offender_counts[ip]}'
+
+        # Send alert message to Telegram
+    send_text = f'https://api.telegram.org/bot{bot_token}/sendMessage?chat_id={chat_id}&text={message}'
+    requests.get(send_text)
+
+# Route: Main sensor data endpoint
+@app.route('/sensor/data', methods=['GET'])
+def get_sensor_data():
+    ip = request.remote_addr
+    path = request.path
+    user_agent = request.headers.get('User-Agent')
+    log_request(ip, path, user_agent)  # Log normal request
+
+    try:
+        temperature = dhtDevice.temperature
+        humidity = dhtDevice.humidity
+
+        if humidity is not None and temperature is not None:
+            return jsonify({'temperature': temperature, 'humidity': humidity})  # Return sensor data as JSON
+        else:
+            return jsonify({'error': 'Sensor read failed'}), 500               # Return error if sensor fails
+
+    except RuntimeError as error:
+        return jsonify({'error': str(error)}), 500                            # Handle sensor exceptions
+
+# Routes: Honeypot fake endpoints to trap attackers
+@app.route('/admin', methods=['GET'])
+@app.route('/config', methods=['GET'])
+@app.route('/hidden', methods=['GET'])
+def fake_endpoint():
+    ip = request.remote_addr
+    path = request.path
+    user_agent = request.headers.get('User-Agent')
+    log_request(ip, path, user_agent, warning=True)  # Log suspicious request
+
+    return jsonify({'message': 'Access denied', 'status': 'This attempt has been logged'}), 403  # Fake denial message
+
+# Start Flask web server
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)  # Run server on all interfaces, port 5000
+
